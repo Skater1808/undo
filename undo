@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-UNDO_VERSION="0.2.0"
+UNDO_VERSION="0.4.0"
 
 UNDO_DIR="${UNDO_DIR:-$HOME/.undo}"
 ENTRIES_DIR="$UNDO_DIR/entries"
@@ -13,448 +13,319 @@ _green()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
 _yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 _bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
-snapshot_dirs() {
-    local snapshot_file="$1"
-    shift
-    > "$snapshot_file"
-    local dir
-    for dir in "$@"; do
-        [ -d "$dir" ] || continue
-        # Skip the undo tool's own state dir to avoid self-referential changes
-        find "$dir" \( -path "$UNDO_DIR" -o -path "$UNDO_DIR/*" \) -prune -o \
-            -maxdepth 10 -printf '%T@\t%m\t%u:%g\t%p\0' 2>/dev/null >> "$snapshot_file" || true
-    done
-    LC_ALL=C sort -z -t$'\t' -k4 "$snapshot_file" -o "$snapshot_file" 2>/dev/null || true
+_undo_snap() {
+    local d="$1" o="$2"
+    [ -d "$d" ] || { : > "$o"; return; }
+    find "$d" -xdev \( -path "$HOME/.undo" -o -path "$HOME/.undo/*" \) -prune -o \
+        -maxdepth 8 -printf '%T@\t%m\t%u:%g\t%p\0' 2>/dev/null | \
+        LC_ALL=C sort -z -t$'\t' -k4 > "$o" 2>/dev/null || : > "$o"
 }
 
-get_watch_dirs() {
-    local cmd="$*"
-    local dirs=()
-    local word
-    local prev=""
-    for word in $cmd; do
-        case "$word" in
-            -*) prev="$word"; continue ;;
-        esac
-        if [[ "$word" == /* ]]; then
-            if [ -e "$word" ]; then
-                if [ -d "$word" ]; then
-                    dirs+=("$word")
-                else
-                    dirs+=("$(dirname "$word")")
-                fi
-            else
-                # Non-existent path: watch its parent, but avoid too-broad parents
-                local parent
-                parent=$(dirname "$word")
-                if [ "$parent" != "/" ]; then
-                    dirs+=("$parent")
-                fi
-            fi
-        fi
-        prev="$word"
-    done
-    dirs+=(".")
-    printf '%s\n' "${dirs[@]}" | LC_ALL=C sort -u
-}
-
-extract_paths() {
-    tr '\0' '\n' | cut -f4 | sort -u
-}
-
-save_file_contents() {
-    local snapshot_dir="$1"
-    local paths_file="$2"
-    local save_dir="$snapshot_dir/backup"
-    mkdir -p "$save_dir"
+_undo_bkup() {
+    local s="$1" d="$2"; mkdir -p "$d"
     local f
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
+    while IFS= read -r -d '' f; do
         [ -f "$f" ] || continue
-        local key
-        key=$(echo "$f" | sed 's|/|__|g')
-        cp -a "$f" "$save_dir/$key" 2>/dev/null || true
-    done < "$paths_file"
+        cp -a "$f" "$d/${f//\//__}" 2>/dev/null || true
+    done < <(tr '\0' '\n' < "$s" | cut -f4 | sort -u | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\0' "$p"
+    done)
 }
 
-do_run() {
-    if [ $# -eq 0 ]; then
-        _red "Usage: undo run <command...>"
-        exit 1
-    fi
-
-    local cmd="$*"
-    local timestamp
-    timestamp=$(date +%s%N)
-    local entry_name="${timestamp}.undo"
-    local entry_file="$ENTRIES_DIR/$entry_name"
-    local snapshot_dir="$STATE_DIR/$timestamp"
-
-    local watch_dirs
-    watch_dirs=$(get_watch_dirs "$cmd")
-
-    mkdir -p "$snapshot_dir"
-
-    # BEFORE snapshot
-    snapshot_dirs "$snapshot_dir/before.snapshot" $watch_dirs
-
-    # Save contents of all existing files (needed for MODIFY and DELETE undo)
-    extract_paths < "$snapshot_dir/before.snapshot" > "$snapshot_dir/before_paths.txt"
-    save_file_contents "$snapshot_dir" "$snapshot_dir/before_paths.txt"
-
-    # Run the command
-    _bold "Running: $cmd"
-    local exit_code=0
-    eval "$cmd" || exit_code=$?
-
-    if [ $exit_code -ne 0 ]; then
-        _yellow "Command exited with code $exit_code"
-    fi
-
-    # AFTER snapshot
-    snapshot_dirs "$snapshot_dir/after.snapshot" $watch_dirs
-    extract_paths < "$snapshot_dir/after.snapshot" > "$snapshot_dir/after_paths.txt"
-
-    # Diff
-    comm -13 "$snapshot_dir/before_paths.txt" "$snapshot_dir/after_paths.txt" > "$snapshot_dir/new_files.txt"
-    comm -23 "$snapshot_dir/before_paths.txt" "$snapshot_dir/after_paths.txt" > "$snapshot_dir/deleted_files.txt"
-    comm -12 "$snapshot_dir/before_paths.txt" "$snapshot_dir/after_paths.txt" > "$snapshot_dir/common_files.txt"
-
-    # Build undo script
+_undo_process() {
+    local ts="$1" cmd="$2" pwd="$3"
+    local s="$HOME/.undo/state/$ts"
+    [ -d "$s" ] && [ -f "$s/before.snap" ] || return
+    _undo_snap "$pwd" "$s/after.snap"
+    cmp -s "$s/before.snap" "$s/after.snap" 2>/dev/null && { rm -rf "$s"; return; }
+    local bf af new del mod total=0
+    bf=$(tr '\0' '\n' < "$s/before.snap" | cut -f4 | sort -u)
+    af=$(tr '\0' '\n' < "$s/after.snap" | cut -f4 | sort -u)
+    new=$(comm -13 <(echo "$bf") <(echo "$af"))
+    del=$(comm -23 <(echo "$bf") <(echo "$af"))
+    mod=""
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue; [ -f "$f" ] || continue
+        local bl al
+        bl=$(grep -zF "$f" "$s/before.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+        al=$(grep -zF "$f" "$s/after.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+        [ -n "$bl" ] && [ -n "$al" ] && [ "$bl" != "$al" ] && mod="${mod}${f}"$'\n'
+    done <<< "$bf"
+    [ -n "$new" ] && total=$((total + $(echo "$new" | grep -c .)))
+    [ -n "$del" ] && total=$((total + $(echo "$del" | grep -c .)))
+    [ -n "$mod" ] && total=$((total + $(echo "$mod" | grep -c .)))
+    [ "$total" -eq 0 ] && { rm -rf "$s"; return; }
+    local e="$HOME/.undo/entries/${ts}.undo"
     {
-        echo "# $cmd"
-
-        local f
+        printf '%s\t%s\t%s\t%s\n' "$ts" "$cmd" "$pwd" "$total"
+        while IFS= read -r f; do [ -z "$f" ] && continue; printf 'CREATE\t%s\n' "$f"; done <<< "$new"
+        while IFS= read -r f; do [ -z "$f" ] && continue; printf 'DELETE\t%s\n' "$f"; done <<< "$del"
         while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            echo "CREATE $f"
-        done < "$snapshot_dir/new_files.txt"
-
-        while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            echo "DELETE $f"
-        done < "$snapshot_dir/deleted_files.txt"
-
-        while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            [ -f "$f" ] || continue
-            local before_line after_line
-            before_line=$(grep -zF "$f" "$snapshot_dir/before.snapshot" | tr '\0' '\n' | head -1) || true
-            after_line=$(grep -zF "$f" "$snapshot_dir/after.snapshot" | tr '\0' '\n' | head -1) || true
-            if [ -n "$before_line" ] && [ -n "$after_line" ] && [ "$before_line" != "$after_line" ]; then
-                local perms owner
-                perms=$(echo "$before_line" | cut -f2)
-                owner=$(echo "$before_line" | cut -f3)
-                echo "MODIFY $f|$perms|$owner"
-            fi
-        done < "$snapshot_dir/common_files.txt"
-
-    } > "$entry_file"
-
-    local change_count
-    change_count=$(grep -cvE '^(#|$)' "$entry_file" 2>/dev/null)
-    change_count="${change_count:-0}"
-    change_count=$(echo "$change_count" | tr -d '[:space:]')
-
-    if [ "$change_count" -eq 0 ] 2>/dev/null; then
-        rm -f "$entry_file"
-        rm -rf "$snapshot_dir"
-        _yellow "No filesystem changes detected. Nothing to undo."
-    else
-        _green "Recorded $change_count change(s). Run 'undo' to reverse."
-    fi
-
-    rm -f "$snapshot_dir/before_paths.txt" "$snapshot_dir/after_paths.txt" \
-          "$snapshot_dir/new_files.txt" "$snapshot_dir/deleted_files.txt" \
-          "$snapshot_dir/common_files.txt"
+            [ -z "$f" ] && continue; local bl al p o
+            bl=$(grep -zF "$f" "$s/before.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+            al=$(grep -zF "$f" "$s/after.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+            p=$(echo "$bl" | cut -f2); o=$(echo "$bl" | cut -f3)
+            printf 'MODIFY\t%s\t%s\t%s\n' "$f" "$p" "$o"
+        done <<< "$mod"
+    } > "$e"
+    rm -f "$s/before.snap" "$s/after.snap"
 }
 
-do_undo_entry() {
-    local target_entry="$1"
-    local entry_file="$ENTRIES_DIR/$target_entry"
-    local snapshot_id="${target_entry%.undo}"
-    local snapshot_dir="$STATE_DIR/$snapshot_id"
+# --- Shell hook: PROMPT_COMMAND-based, no DEBUG trap ---
+do_hook() {
+    cat <<'HOOK'
+# undo v0.4.0 - automatic filesystem undo
+# eval "$(undo --hook)"
+mkdir -p "$HOME/.undo/entries" "$HOME/.undo/state"
 
-    if [ ! -f "$entry_file" ]; then
-        _red "Eintrag nicht gefunden: $target_entry"
-        return 1
+_undo_s() {
+    local d="$1" o="$2"
+    [ -d "$d" ] || { : > "$o"; return; }
+    find "$d" -xdev \( -path "$HOME/.undo" -o -path "$HOME/.undo/*" \) -prune -o \
+        -maxdepth 8 -printf '%T@\t%m\t%u:%g\t%p\0' 2>/dev/null | \
+        LC_ALL=C sort -z -t$'\t' -k4 > "$o" 2>/dev/null || : > "$o"
+}
+_undo_b() {
+    local s="$1" d="$2"; mkdir -p "$d"
+    local f
+    while IFS= read -r -d '' f; do
+        [ -f "$f" ] || continue
+        cp -a "$f" "$d/${f//\//__}" 2>/dev/null || true
+    done < <(tr '\0' '\n' < "$s" | cut -f4 | sort -u | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\0' "$p"
+    done)
+}
+_undo_p() {
+    local ts="$1" cmd="$2" pwd="$3"
+    local s="$HOME/.undo/state/$ts"
+    [ -d "$s" ] && [ -f "$s/before.snap" ] || return
+    _undo_s "$pwd" "$s/after.snap"
+    cmp -s "$s/before.snap" "$s/after.snap" 2>/dev/null && { rm -rf "$s"; return; }
+    local bf af new del mod total=0
+    bf=$(tr '\0' '\n' < "$s/before.snap" | cut -f4 | sort -u)
+    af=$(tr '\0' '\n' < "$s/after.snap" | cut -f4 | sort -u)
+    new=$(comm -13 <(echo "$bf") <(echo "$af"))
+    del=$(comm -23 <(echo "$bf") <(echo "$af"))
+    mod=""
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue; [ -f "$f" ] || continue
+        local bl al
+        bl=$(grep -zF "$f" "$s/before.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+        al=$(grep -zF "$f" "$s/after.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+        [ -n "$bl" ] && [ -n "$al" ] && [ "$bl" != "$al" ] && mod="${mod}${f}"$'\n'
+    done <<< "$bf"
+    [ -n "$new" ] && total=$((total + $(echo "$new" | grep -c .)))
+    [ -n "$del" ] && total=$((total + $(echo "$del" | grep -c .)))
+    [ -n "$mod" ] && total=$((total + $(echo "$mod" | grep -c .)))
+    [ "$total" -eq 0 ] && { rm -rf "$s"; return; }
+    local e="$HOME/.undo/entries/${ts}.undo"
+    {
+        printf '%s\t%s\t%s\t%s\n' "$ts" "$cmd" "$pwd" "$total"
+        while IFS= read -r f; do [ -z "$f" ] && continue; printf 'CREATE\t%s\n' "$f"; done <<< "$new"
+        while IFS= read -r f; do [ -z "$f" ] && continue; printf 'DELETE\t%s\n' "$f"; done <<< "$del"
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue; local bl al p o
+            bl=$(grep -zF "$f" "$s/before.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+            al=$(grep -zF "$f" "$s/after.snap" 2>/dev/null | tr '\0' '\n' | head -1)
+            p=$(echo "$bl" | cut -f2); o=$(echo "$bl" | cut -f3)
+            printf 'MODIFY\t%s\t%s\t%s\n' "$f" "$p" "$o"
+        done <<< "$mod"
+    } > "$e"
+    rm -f "$s/before.snap" "$s/after.snap"
+}
+
+_undo_hook() {
+    # Process previous command if pending
+    if [ -f "$HOME/.undo/pending" ]; then
+        local _p; _p=$(cat "$HOME/.undo/pending"); rm -f "$HOME/.undo/pending"
+        local _ts _cmd _pwd
+        _ts=$(echo "$_p" | cut -f1)
+        _cmd=$(echo "$_p" | cut -f2)
+        _pwd=$(echo "$_p" | cut -f3)
+        _undo_p "$_ts" "$_cmd" "$_pwd"
     fi
+    # Snapshot for next command
+    local _ts; _ts=$(date +%s%N)
+    local _cmd=""
+    if [ -n "$BASH_VERSION" ]; then
+        _cmd=$(HISTTIMEFORMAT='%s\t' history 1 2>/dev/null | sed 's/^[ ]*[0-9]*[ ]*[0-9]*[ ]*//')
+    elif [ -n "$ZSH_VERSION" ]; then
+        _cmd=$(fc -ln -1 2>/dev/null | sed 's/^[ ]*//')
+    fi
+    # Skip undo's own commands
+    [[ "$_cmd" == undo* ]] && return
+    local _snap="$HOME/.undo/state/$_ts"
+    mkdir -p "$_snap"
+    _undo_s "$PWD" "$_snap/before.snap"
+    _undo_b "$_snap/before.snap" "$_snap/backup"
+    printf '%s\t%s\t%s\n' "$_ts" "$_cmd" "$PWD" > "$HOME/.undo/pending"
+}
 
-    _bold "Undoing: $(head -1 "$entry_file" | sed 's/^# //')"
+if [ -n "$BASH_VERSION" ]; then
+    PROMPT_COMMAND="_undo_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+elif [ -n "$ZSH_VERSION" ]; then
+    autoload -U add-zsh-hook
+    add-zsh-hook precmd _undo_hook
+fi
+HOOK
+}
 
-    # Undo in reverse order: first undo modifies+creates, then restores deletes
+# --- Undo execution ---
+
+undo_entry() {
+    local file="$ENTRIES_DIR/$1"
+    [ -f "$file" ] || { _red "Entry not found: $1"; return 1; }
+    local snap_dir="$STATE_DIR/${1%.undo}"
+    local hdr; hdr=$(head -1 "$file")
+    local cmd; cmd=$(echo "$hdr" | cut -f2)
+    local wdir; wdir=$(echo "$hdr" | cut -f3)
+    _bold "Undoing: $cmd"
+    [ -d "$wdir" ] && cd "$wdir"
     local creates=() deletes=() modifies=()
-    local line
-    while IFS= read -r line; do
-        case "$line" in
-            CREATE\ *) creates+=("${line#CREATE }") ;;
-            DELETE\ *) deletes+=("${line#DELETE }") ;;
-            MODIFY\ *) modifies+=("${line#MODIFY }") ;;
+    while IFS=$'\t' read -r type rest; do
+        case "$type" in
+            CREATE) creates+=("$rest") ;;
+            DELETE) deletes+=("$rest") ;;
+            MODIFY) modifies+=("$rest") ;;
         esac
-    done < "$entry_file"
-
-    # 1. Remove created files
-    local f
+    done < <(tail -n +2 "$file")
     for f in "${creates[@]}"; do
-        [ -z "$f" ] && continue
-        if [ -e "$f" ]; then
-            echo "  removing created: $f"
-            rm -rf "$f"
-        fi
+        [ -e "$f" ] && echo "  remove $f" && rm -rf "$f"
     done
-
-    # 2. Restore modified files
-    local entry
     for entry in "${modifies[@]}"; do
-        [ -z "$entry" ] && continue
-        local orig_file="${entry%%|*}"
-        local rest="${entry#*|}"
-        local orig_perms="${rest%%|*}"
-        local owner="${rest#*:}"
-        local user="${rest%%:*}"
-        local group="${rest#*:}"
-        local key
-        key=$(echo "$orig_file" | sed 's|/|__|g')
-        local saved_file="$snapshot_dir/backup/$key"
-        if [ -f "$saved_file" ]; then
-            echo "  restoring: $orig_file"
-            cp -a "$saved_file" "$orig_file"
-            chmod "$orig_perms" "$orig_file" 2>/dev/null || true
-            chown "$user:$group" "$orig_file" 2>/dev/null || true
-        else
-            echo "  (cannot restore: $orig_file - backup missing)"
+        local orig_file perms owner
+        orig_file=$(echo "$entry" | cut -f1)
+        perms=$(echo "$entry" | cut -f2)
+        owner=$(echo "$entry" | cut -f3)
+        local saved="$snap_dir/backup/${orig_file//\//__}"
+        if [ -f "$saved" ]; then
+            echo "  restore $orig_file"
+            cp -a "$saved" "$orig_file"
+            chmod "$perms" "$orig_file" 2>/dev/null || true
+            chown "$owner" "$orig_file" 2>/dev/null || true
         fi
     done
-
-    # 3. Restore deleted files (directories recreated automatically by restoring files)
-    local f
     for f in "${deletes[@]}"; do
-        [ -z "$f" ] && continue
-        local key
-        key=$(echo "$f" | sed 's|/|__|g')
-        local saved_file="$snapshot_dir/backup/$key"
-        if [ -f "$saved_file" ]; then
-            echo "  restoring deleted: $f"
+        local saved="$snap_dir/backup/${f//\//__}"
+        if [ -f "$saved" ]; then
+            echo "  restore $f"
             mkdir -p "$(dirname "$f")"
-            cp -a "$saved_file" "$f"
+            cp -a "$saved" "$f"
         fi
-        # Note: directories have no backup - they are recreated via mkdir -p above
     done
-
-    rm -f "$entry_file"
-    rm -rf "$snapshot_dir"
+    rm -f "$file"
+    rm -rf "$snap_dir"
     _green "Done."
 }
 
-do_list() {
-    _bold "Undo history:"
-    local count=0
-    local entry
-    for entry in $(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -rn); do
-        local cmd_text
-        cmd_text=$(head -1 "$ENTRIES_DIR/$entry" | sed 's/^# //')
-        local changes
-        changes=$(grep -cvE '^(#|$)' "$ENTRIES_DIR/$entry" 2>/dev/null || echo "0")
-        changes=$(echo "$changes" | tr -d '[:space:]')
-        local ts="${entry%.undo}"
-        local seconds=$((ts / 1000000000))
-        local time_str
-        time_str=$(date -d "@$seconds" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$seconds")
-        printf '  [%d] %s  %s  (%s change(s))\n' "$((count+1))" "$time_str" "$cmd_text" "$changes"
+list_entries() {
+    local n="${1:-10}" count=0
+    for entry in $(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -rn | head -"$n"); do
+        local hdr; hdr=$(head -1 "$ENTRIES_DIR/$entry")
+        local ts cmd changes
+        ts=$(echo "$hdr" | cut -f1)
+        cmd=$(echo "$hdr" | cut -f2)
+        changes=$(echo "$hdr" | cut -f4)
+        local sec=$((ts / 1000000000))
+        local t; t=$(date -d "@$sec" '+%H:%M:%S' 2>/dev/null || echo "$sec")
         count=$((count + 1))
+        printf '  \033[1m%2d\033[0m  %s  %s  (%s changes)\n' "$count" "$t" "$cmd" "$changes"
     done
     [ $count -eq 0 ] && _yellow "  (empty)"
 }
 
-# Interaktive Abfrage: welchen Befehl rückgängig machen?
-do_interactive_undo() {
+do_interactive() {
     local entries=()
-    while IFS= read -r e; do
-        [ -n "$e" ] && entries+=("$e")
-    done < <(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -rn)
-
-    if [ ${#entries[@]} -eq 0 ]; then
-        _yellow "Nothing to undo."
-        return 0
-    fi
-
-    # Wenn nur ein Eintrag: direkt rückgängig (mit Nachfrage)
-    # Bei mehreren: Auswahl
-
-    # Baue Anzeige-Liste für fzf / manuelle Auswahl
-    local display_lines=()
-    local i=0
-    for entry in "${entries[@]}"; do
-        i=$((i+1))
-        local cmd_text
-        cmd_text=$(head -1 "$ENTRIES_DIR/$entry" | sed 's/^# //')
-        local changes
-        changes=$(grep -cvE '^(#|$)' "$ENTRIES_DIR/$entry" 2>/dev/null || echo "0")
-        changes=$(echo "$changes" | tr -d '[:space:]')
-        local ts="${entry%.undo}"
-        local seconds=$((ts / 1000000000))
-        local time_str
-        time_str=$(date -d "@$seconds" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$seconds")
-        # Format: "  [1] 2026-09-07 14:00:00  rm -rf /tmp/foo  (3 changes)  ::ENTRY::filename"
-        display_lines+=("[$i] $time_str  $cmd_text  ($changes change(s))")
+    while IFS= read -r e; do [ -n "$e" ] && entries+=("$e"); done \
+        < <(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -rn)
+    [ ${#entries[@]} -eq 0 ] && { _yellow "Nothing to undo."; return; }
+    local lines=()
+    for i in "${!entries[@]}"; do
+        local hdr; hdr=$(head -1 "$ENTRIES_DIR/${entries[$i]}")
+        local ts cmd chg; ts=$(echo "$hdr" | cut -f1); cmd=$(echo "$hdr" | cut -f2); chg=$(echo "$hdr" | cut -f4)
+        local sec=$((ts / 1000000000))
+        local t; t=$(date -d "@$sec" '+%H:%M:%S' 2>/dev/null || echo "$sec")
+        lines+=("[$((i+1))] $t  $cmd  ($chg changes)")
     done
-
     local chosen=""
-    local chosen_index=""
-
     if command -v fzf >/dev/null 2>&1 && [ -t 1 ] && [ -t 0 ]; then
-        # fzf verfügbar -> fuzzy finder
-        _bold "Welchen Befehl rückgängig machen? (fzf)"
-        echo ""
-        local selected
-        selected=$(printf '%s\n' "${display_lines[@]}" | fzf \
-            --prompt="undo> " \
-            --header="Welchen Befehl rückgängig machen? (ESC zum Abbrechen)" \
-            --height=15 --reverse --border \
-            --preview="echo {}; echo '---'; grep -v '^#' \"$ENTRIES_DIR/${entries[0]}\" | head -20" 2>/dev/null) || true
-
-        if [ -z "$selected" ]; then
-            _yellow "Abgebrochen."
-            return 0
-        fi
-        # Extrahiere Index aus "[N]"
-        chosen_index=$(echo "$selected" | sed -n 's/^\[\([0-9]*\)\].*/\1/p')
+        local sel
+        sel=$(printf '%s\n' "${lines[@]}" | fzf --prompt="undo> " --height=15 --reverse --border 2>/dev/null) || true
+        [ -z "$sel" ] && { _yellow "Cancelled."; return; }
+        chosen=$(echo "$sel" | sed -n 's/^\[\([0-9]*\)\].*/\1/p')
     else
-        # Fallback: nummerierte Liste + read
-        _bold "Welchen Befehl rückgängig machen?"
+        _bold "Last ${#entries[@]} commands:"
         echo ""
-        local idx=0
-        for line in "${display_lines[@]}"; do
-            idx=$((idx+1))
-            if [ $idx -eq 1 ]; then
-                printf '  \033[0;32m%s\033[0m  <- neuester\n' "$line"
-            else
-                printf '  %s\n' "$line"
-            fi
+        for i in "${!lines[@]}"; do
+            [ $i -eq 0 ] && printf '  \033[0;32m%s\033[0m  <- latest\n' "${lines[$i]}" \
+                          || printf '  %s\n' "${lines[$i]}"
         done
         echo ""
-        if [ ! -t 0 ]; then
-            # Pipe / nicht-interaktiv: versuche Auswahl zu lesen, sonst default 1
-            if read -r chosen_index 2>/dev/null; then
-                [ -z "$chosen_index" ] && chosen_index=1
-            else
-                chosen_index=1
-                echo "  (nicht-interaktiv: nehme letzten -> [1])"
-            fi
-            if [[ "$chosen_index" == "q" || "$chosen_index" == "Q" ]]; then
-                _yellow "Abgebrochen."
-                return 0
-            fi
-        else
-            printf "Auswahl [1-%d, q=Abbruch, Enter=1]: " "${#entries[@]}"
-            read -r chosen_index || true
-            if [ -z "$chosen_index" ]; then
-                chosen_index=1
-            fi
-            if [[ "$chosen_index" == "q" || "$chosen_index" == "Q" ]]; then
-                _yellow "Abgebrochen."
-                return 0
-            fi
-        fi
+        printf "Select [1-%d, q=cancel, Enter=1]: " "${#entries[@]}"
+        read -r chosen || true
+        [ -z "$chosen" ] && chosen=1
+        [[ "$chosen" == [qQ] ]] && { _yellow "Cancelled."; return; }
     fi
-
-    if ! [[ "$chosen_index" =~ ^[0-9]+$ ]] || [ "$chosen_index" -lt 1 ] || [ "$chosen_index" -gt ${#entries[@]} ]; then
-        _red "Ungültige Auswahl: $chosen_index"
-        return 1
-    fi
-
-    local target_entry="${entries[$((chosen_index-1))]}"
-    local cmd_text
-    cmd_text=$(head -1 "$ENTRIES_DIR/$target_entry" | sed 's/^# //')
-
-    _yellow "Ausgewählt: $cmd_text"
-
-    # Bestätigung (nur im interaktiven Modus, nicht bei Pipe)
+    [[ "$chosen" =~ ^[0-9]+$ ]] && [ "$chosen" -ge 1 ] && [ "$chosen" -le ${#entries[@]} ] || { _red "Invalid: $chosen"; return 1; }
+    local target="${entries[$((chosen-1))]}"
+    _yellow "Selected: $(head -1 "$ENTRIES_DIR/$target" | cut -f2)"
     if [ -t 0 ]; then
-        printf "Wirklich rückgängig machen? [j/N]: "
-        local confirm
-        read -r confirm || true
-        case "$confirm" in
-            j|J|y|Y|yes|ja) ;;
-            *) _yellow "Abgebrochen."; return 0 ;;
-        esac
+        printf "Undo? [y/N]: "
+        read -r c || true
+        case "$c" in j|J|y|Y|yes|ja) ;; *) _yellow "Cancelled."; return ;; esac
     fi
-
-    do_undo_entry "$target_entry"
+    undo_entry "$target"
 }
 
-# Wrapper für direkten Undo (letzter Eintrag, ohne Abfrage) - für Scripts/Automation
 do_undo_last() {
-    local latest_entry
-    latest_entry=$(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -n | tail -1)
-    if [ -z "$latest_entry" ]; then
-        _yellow "Nothing to undo."
-        return 0
-    fi
-    do_undo_entry "$latest_entry"
+    local latest; latest=$(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -n | tail -1)
+    [ -z "$latest" ] && { _yellow "Nothing to undo."; return; }
+    undo_entry "$latest"
 }
 
 do_clear() {
     rm -rf "$ENTRIES_DIR"/* "$STATE_DIR"/* 2>/dev/null || true
-    _green "Undo history cleared."
+    rm -f "$UNDO_DIR/pending"
+    _green "History cleared."
 }
 
 usage() {
-    _bold "undo $UNDO_VERSION - Reverse filesystem changes"
-    echo ""
-    echo "Usage:"
-    echo "  undo run <command>   Run a command and track changes for undo"
-    echo "  undo                 Interaktiv: Abfrage welcher Befehl rückgängig gemacht werden soll"
-    echo "  undo --last          Direkt den letzten Befehl rückgängig (ohne Abfrage)"
-    echo "  undo list            Show undo history"
-    echo "  undo clear           Clear undo history"
-    echo "  undo -h, --help      Show this help"
-    echo "  undo --version       Show version"
-    echo ""
-    echo "Examples:"
-    echo "  undo run rm -rf /tmp/mydir"
-    echo "  undo run cp -r /data/backup /tmp/"
-    echo "  undo                 # zeigt Auswahl an"
-    echo "  undo --last          # direkt letzten rückgängig"
+    cat <<EOF
+undo $UNDO_VERSION - Automatic filesystem undo
+
+Setup:
+  eval "\$(undo --hook)"
+
+Add to ~/.bashrc or ~/.zshrc.
+
+Usage:
+  undo              Show last 10 commands, pick one to undo
+  undo <N>          Undo command N directly
+  undo --last       Undo the last command
+  undo list [N]     Show last N commands (default: 10)
+  undo clear        Clear history
+  undo --hook       Print shell hook code
+  undo --help       Show this help
+  undo --version    Show version
+EOF
 }
 
 case "${1:-}" in
-    run)
-        shift
-        do_run "$@"
-        ;;
-    list|ls|history)
-        do_list
-        ;;
-    clear|reset)
-        do_clear
-        ;;
-    --last|-y|--yes)
-        do_undo_last
-        ;;
-    --version|-V|version)
-        echo "undo $UNDO_VERSION"
-        ;;
-    -h|--help|help)
-        usage
-        ;;
-    "")
-        do_interactive_undo
-        ;;
+    list|ls|history) list_entries "${2:-10}" ;;
+    clear|reset)     do_clear ;;
+    --last|-y)       do_undo_last ;;
+    --hook)          do_hook ;;
+    --version|-V)    echo "undo $UNDO_VERSION" ;;
+    -h|--help|help)  usage ;;
+    "")              do_interactive ;;
     [0-9]*)
-        # Direkte Auswahl per Nummer: undo 1 = neuesten, undo 2 = zweitneuesten, etc.
         entries_sorted=($(find "$ENTRIES_DIR" -maxdepth 1 -name '*.undo' -printf '%f\n' 2>/dev/null | sort -rn))
-        idx="$1"
-        if [ "$idx" -ge 1 ] 2>/dev/null && [ "$idx" -le ${#entries_sorted[@]} ]; then
-            do_undo_entry "${entries_sorted[$((idx-1))]}"
+        if [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le ${#entries_sorted[@]} ]; then
+            undo_entry "${entries_sorted[$(( $1 - 1 ))]}"
         else
-            _red "Ungültige Nummer: $1 (1-${#entries_sorted[@]})"
+            _red "Invalid: $1 (1-${#entries_sorted[@]})"
             exit 1
         fi
         ;;
-    *)
-        _red "Unknown command: $1"
-        usage
-        exit 1
-        ;;
+    *) _red "Unknown: $1"; usage; exit 1 ;;
 esac
