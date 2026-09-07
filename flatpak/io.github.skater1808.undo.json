@@ -7,6 +7,8 @@
     "finish-args": [
         "--filesystem=host",
         "--filesystem=home",
+        "--filesystem=/tmp",
+        "--persist=/tmp",
         "--share=network",
         "--socket=fallback-x11",
         "--device=dri"
