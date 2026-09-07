@@ -12,6 +12,6 @@ pkgbase = undo
 	depends = gawk
 	optdepends = fzf: interaktive Fuzzy-Auswahl beim Rückgängig machen
 	source = undo-0.2.0.tar.gz::https://github.com/skater1808/undo/archive/refs/tags/v0.2.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 08b9916411fd9fec1b0f688abbe0eea63b7e7129e53f7febeaf2fab11339f2d0
 
 pkgname = undo
