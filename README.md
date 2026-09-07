@@ -2,59 +2,54 @@
 
 Automatically tracks filesystem changes from shell commands and lets you undo them.
 
-> Run any command → `undo` → pick which one to reverse.
-
-**No prefix needed.** Just add `eval "$(undo --hook)"` to your shell config.
-
-## Setup
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc:
-eval "$(undo --hook)"
-
-# Or for zsh:
-echo 'eval "$(undo --hook)"' >> ~/.zshrc
-```
-
-Then restart your shell or run `source ~/.bashrc`.
-
-## Usage
-
-```bash
-# Just use your shell normally — commands are tracked automatically
-rm important.txt
-mv file /tmp/
-cp -r backup/ /home/
-
-# See what happened and undo
-undo              # shows last 10 commands, pick one to undo
-undo 3            # undo command #3 directly
-undo --last       # undo the last command
-undo list 20      # show last 20 commands
-undo clear        # clear history
-```
+> `rm important.txt` → `undo` → file is back.
 
 ## Install
 
 ```bash
-# Direct install
-curl -sL https://github.com/Skater1808/undo/releases/download/v0.2.0/undo -o ~/.local/bin/undo
-chmod +x ~/.local/bin/undo
+bash <(curl -sL https://raw.githubusercontent.com/Skater1808/undo/master/install.sh)
+```
 
-# Or symlink
-ln -sf "$PWD/undo" ~/.local/bin/undo
+This downloads `undo` to `~/.local/bin/` and adds the hook to your shell config.
+
+Then restart your shell:
+
+```bash
+source ~/.bashrc   # or ~/.zshrc
+```
+
+### What the installer does
+
+- Downloads `undo` to `~/.local/bin/undo`
+- Adds `eval "$(undo --hook)"` to your `.bashrc` or `.zshrc`
+- No sudo required
+
+## Usage
+
+```bash
+# Just use your shell normally — everything is tracked
+rm important.txt
+mv file /tmp/
+cp -r backup/ /home/
+
+# Undo something
+undo              # show last 10 commands, pick one
+undo 3            # undo #3 directly
+undo --last       # undo last command
+undo list 20      # show last 20 commands
+undo clear        # clear history
 ```
 
 ## Examples
 
 ```bash
-# Oops, deleted the wrong file
+# Deleted the wrong file
 rm -rf ~/projects/important/
-undo               # see "rm -rf ~/projects/important/", pick #1, done
+undo               # pick #1, file is back
 
 # Moved a file to the wrong place
 mv ~/docs/report.pdf /tmp/
-undo               # file is back
+undo               # file restored
 
 # Multiple mistakes
 rm file1.txt
@@ -65,21 +60,18 @@ undo               # pick which one to undo
 
 ## How it works
 
-1. **Before each command**: snapshot the working directory + backup all file contents
+1. **Before each command**: snapshot working directory + backup all file contents
 2. **After each command**: compare snapshots, detect changes (CREATE/DELETE/MODIFY)
-3. **`undo` command**: restore from backups — deleted files reappear, created files are removed, modified files revert
+3. **`undo`**: restore from backups — deleted files reappear, created files removed, modified files revert
 
-All data stored in `~/.undo/` (configurable via `UNDO_DIR`).
+Data stored in `~/.undo/` (configurable via `UNDO_DIR`).
 
-## Limitations
+## Requirements
 
-- Tracks changes in the current working directory (recursive, depth 8)
-- Very large directories may slow down the snapshot
-- `~/.undo/` is excluded from snapshots (no self-referential changes)
-- Works with bash and zsh
+- bash or zsh
+- `curl` (for install only)
+- Optional: `fzf` for fuzzy finder UI
 
-## Version
+## License
 
-```
-undo --version
-```
+MIT
