@@ -135,6 +135,8 @@ _undo_p() {
 }
 
 _undo_hook() {
+    # Skip first prompt (shell startup)
+    [ "${_UNDO_STARTED:-0}" = 0 ] && { _UNDO_STARTED=1; return; }
     # Process previous command if pending
     if [ -f "$HOME/.undo/pending" ]; then
         local _p; _p=$(cat "$HOME/.undo/pending"); rm -f "$HOME/.undo/pending"
