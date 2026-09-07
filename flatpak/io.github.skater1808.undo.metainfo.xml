@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="console-application">
-  <id>io.github.anomalyco.undo</id>
+  <id>io.github.skater1808.undo</id>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <name>undo</name>
@@ -12,15 +12,15 @@
     </p>
     <p>Nutzung: `undo run &lt;befehl&gt;` und danach `undo` für die interaktive Auswahl.</p>
   </description>
-  <launchable type="desktop-id">io.github.anomalyco.undo.desktop</launchable>
+  <launchable type="desktop-id">io.github.skater1808.undo.desktop</launchable>
   <provides>
     <binary>undo</binary>
   </provides>
-  <developer id="io.github.anomalyco">
-    <name>anomalyco</name>
+  <developer id="io.github.skater1808">
+    <name>skater1808</name>
   </developer>
-  <url type="homepage">https://github.com/anomalyco/undo</url>
-  <url type="bugtracker">https://github.com/anomalyco/undo/issues</url>
+  <url type="homepage">https://github.com/skater1808/undo</url>
+  <url type="bugtracker">https://github.com/skater1808/undo/issues</url>
   <categories>
     <category>System</category>
     <category>Utility</category>

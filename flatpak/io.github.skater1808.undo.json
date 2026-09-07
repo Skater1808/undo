@@ -1,5 +1,5 @@
 {
-    "app-id": "io.github.anomalyco.undo",
+    "app-id": "io.github.skater1808.undo",
     "runtime": "org.freedesktop.Platform",
     "runtime-version": "23.08",
     "sdk": "org.freedesktop.Sdk",
@@ -19,8 +19,8 @@
                 "install -Dm755 undo /app/bin/undo",
                 "install -Dm644 LICENSE /app/share/licenses/undo/LICENSE",
                 "install -Dm644 README.md /app/share/doc/undo/README.md",
-                "install -Dm644 flatpak/io.github.anomalyco.undo.metainfo.xml /app/share/metainfo/io.github.anomalyco.undo.metainfo.xml",
-                "install -Dm644 flatpak/io.github.anomalyco.undo.desktop /app/share/applications/io.github.anomalyco.undo.desktop"
+                "install -Dm644 flatpak/io.github.skater1808.undo.metainfo.xml /app/share/metainfo/io.github.skater1808.undo.metainfo.xml",
+                "install -Dm644 flatpak/io.github.skater1808.undo.desktop /app/share/applications/io.github.skater1808.undo.desktop"
             ],
             "sources": [
                 {

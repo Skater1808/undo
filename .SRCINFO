@@ -2,7 +2,7 @@ pkgbase = undo
 	pkgdesc = Rückgängig für Linux-Befehle – zeichnet Filesystem-Änderungen auf und macht sie per interaktiver Abfrage rückgängig
 	pkgver = 0.2.0
 	pkgrel = 1
-	url = https://github.com/anomalyco/undo
+	url = https://github.com/skater1808/undo
 	arch = any
 	license = MIT
 	depends = bash
@@ -11,7 +11,7 @@ pkgbase = undo
 	depends = grep
 	depends = gawk
 	optdepends = fzf: interaktive Fuzzy-Auswahl beim Rückgängig machen
-	source = undo-0.2.0.tar.gz::https://github.com/anomalyco/undo/archive/refs/tags/v0.2.0.tar.gz
+	source = undo-0.2.0.tar.gz::https://github.com/skater1808/undo/archive/refs/tags/v0.2.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = undo

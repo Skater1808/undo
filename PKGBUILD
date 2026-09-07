@@ -1,16 +1,16 @@
-# Maintainer: Emil <emil@example.com>
+# Maintainer: skater1808 <skater1808@github.com>
 pkgname=undo
 pkgver=0.2.0
 pkgrel=1
 pkgdesc="Rückgängig für Linux-Befehle – zeichnet Filesystem-Änderungen auf und macht sie per interaktiver Abfrage rückgängig"
 arch=('any')
-url="https://github.com/anomalyco/undo"
+url="https://github.com/skater1808/undo"
 license=('MIT')
 depends=('bash' 'coreutils' 'findutils' 'grep' 'gawk')
 optdepends=('fzf: interaktive Fuzzy-Auswahl beim Rückgängig machen')
 # Für AUR: Quellen von GitHub Release – damit muss das Projekt NICHT lokal liegen
 # Nach jedem Version-Bump: updpkgsums ausführen!
-source=("$pkgname-$pkgver.tar.gz::https://github.com/anomalyco/undo/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/skater1808/undo/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 package() {

@@ -26,18 +26,18 @@ Paket: [`PKGBUILD`](PKGBUILD) – hängt nur von `bash`, `coreutils`, `findutils
 
 ```bash
 # lokal bauen & installieren (erfordert flatpak-builder)
-flatpak-builder --user --install build-dir flatpak/io.github.anomalyco.undo.json
+flatpak-builder --user --install build-dir flatpak/io.github.skater1808.undo.json
 
 # danach als CLI nutzen (braucht host-Zugriff):
-flatpak run --filesystem=host io.github.anomalyco.undo run rm -rf /tmp/mydir
-flatpak run --filesystem=host io.github.anomalyco.undo
+flatpak run --filesystem=host io.github.skater1808.undo run rm -rf /tmp/mydir
+flatpak run --filesystem=host io.github.skater1808.undo
 # Alias empfohlen:
-alias undo='flatpak run --filesystem=host io.github.anomalyco.undo'
+alias undo='flatpak run --filesystem=host io.github.skater1808.undo'
 ```
 
 Oder aus Flathub (nach Veröffentlichung):
 ```bash
-flatpak install flathub io.github.anomalyco.undo
+flatpak install flathub io.github.skater1808.undo
 ```
 
 ### Manuell / ohne Paketmanager
