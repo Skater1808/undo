@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-UNDO_VERSION="0.4.0"
+UNDO_VERSION="0.4.1"
 
 UNDO_DIR="${UNDO_DIR:-$HOME/.undo}"
 ENTRIES_DIR="$UNDO_DIR/entries"
@@ -74,7 +74,7 @@ _undo_process() {
 # --- Shell hook: PROMPT_COMMAND-based, no DEBUG trap ---
 do_hook() {
     cat <<'HOOK'
-# undo v0.4.0 - automatic filesystem undo
+# undo v0.4.1 - automatic filesystem undo
 # eval "$(undo --hook)"
 mkdir -p "$HOME/.undo/entries" "$HOME/.undo/state"
 
@@ -96,6 +96,7 @@ _undo_b() {
     done)
 }
 _undo_p() {
+    mkdir -p "$HOME/.undo/entries" "$HOME/.undo/state"
     local ts="$1" cmd="$2" pwd="$3"
     local s="$HOME/.undo/state/$ts"
     [ -d "$s" ] && [ -f "$s/before.snap" ] || return
@@ -137,6 +138,8 @@ _undo_p() {
 _undo_hook() {
     # Skip first prompt (shell startup)
     [ "${_UNDO_STARTED:-0}" = 0 ] && { _UNDO_STARTED=1; return; }
+    # Self-heal: recreate data dirs if deleted
+    mkdir -p "$HOME/.undo/entries" "$HOME/.undo/state"
     # Process previous command if pending
     if [ -f "$HOME/.undo/pending" ]; then
         local _p; _p=$(cat "$HOME/.undo/pending"); rm -f "$HOME/.undo/pending"
