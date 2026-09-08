@@ -58,6 +58,22 @@ cp -r data/ /tmp/backup/
 undo               # pick which one to undo
 ```
 
+## Smart undo (command-aware)
+
+For known commands, `undo` uses the idiomatic rollback instead of raw file restore:
+
+| command                | undo does                                       |
+|------------------------|-------------------------------------------------|
+| `git commit`           | `git reset --soft HEAD~1`; if the commit is already pushed: menu (local reset / force-push / `git revert`) |
+| `pacman/yay -S …`      | `pacman -Rns <pkgs>` (upgrades like `-Syu` are left to generic) |
+| `apt/dnf install …`    | `apt/dnf remove -y <pkgs>`                      |
+| `pip install …`        | `pip uninstall -y <pkgs>`                       |
+| `npm/pnpm/yarn add …`  | `npm/pnpm/yarn uninstall <pkgs>`                |
+| `systemctl enable/…`   | inverse action (`disable`, `stop`, `unmask`, …) |
+| everything else        | generic file restore (default)                  |
+
+All destructive handler actions ask for confirmation; force-push refuses when there is no terminal. Disable smart undo with `UNDO_SMART=0 undo …`.
+
 ## How it works
 
 1. **Before each command**: snapshot working directory + backup all file contents

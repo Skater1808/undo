@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-UNDO_VERSION="0.4.2"
+UNDO_VERSION="0.5.0"
 
 UNDO_DIR="${UNDO_DIR:-$HOME/.undo}"
 ENTRIES_DIR="$UNDO_DIR/entries"
@@ -74,7 +74,7 @@ _undo_process() {
 # --- Shell hook: PROMPT_COMMAND-based, no DEBUG trap ---
 do_hook() {
     cat <<'HOOK'
-# undo v0.4.2 - automatic filesystem undo
+# undo v0.5.0 - automatic filesystem undo
 # eval "$(undo --hook)"
 mkdir -p "$HOME/.undo/entries" "$HOME/.undo/state"
 
@@ -175,6 +175,167 @@ fi
 HOOK
 }
 
+# --- Smart undo: command-aware handlers ---
+
+_trim() { local s="${1#"${1%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+
+_confirm() {
+    local q="$1"
+    if [ ! -t 0 ]; then printf '%s\n' "  (keine TTY - abgebrochen)" >&2; return 1; fi
+    printf '%s [y/N]: ' "$q"
+    local r; read -r r
+    case "${r:-n}" in [yYjJ]*) return 0 ;; *) return 1 ;; esac
+}
+
+# Returns handler function name matching the command, or empty.
+detect_handler() {
+    [ "${UNDO_SMART:-1}" = "0" ] && return 0
+    local c; c=$(_trim "$1")
+    case "$c" in
+        git\ commit*)              echo handler_git ;;
+        pacman\ -S*|yay\ -S*|paru\ -S*) echo handler_pacman ;;
+        sudo\ pacman\ -S*|sudo\ yay\ -S*|sudo\ paru\ -S*) echo handler_pacman ;;
+        apt\ install*|sudo\ apt\ install*|dnf\ install*|sudo\ dnf\ install*) echo handler_pkg ;;
+        pip\ install*|pip3\ install*|python\ -m\ pip\ install*|python3\ -m\ pip\ install*) echo handler_pip ;;
+        npm\ install*|npm\ i*|pnpm\ add*|yarn\ add*) echo handler_npm ;;
+        systemctl\ enable*|systemctl\ disable*|systemctl\ mask*|systemctl\ unmask*|systemctl\ start*|systemctl\ stop*) echo handler_systemctl ;;
+    esac
+}
+
+# Exit codes: 0 = done, 1 = not applicable (generic fallback), 2 = cancelled by user.
+handler_git() {
+    local hdr cmd wdir
+    hdr=$(head -1 "$1")
+    cmd=$(_trim "$(echo "$hdr" | cut -f2)")
+    wdir=$(echo "$hdr" | cut -f3)
+    [ -d "$wdir" ] && cd "$wdir" 2>/dev/null
+    git rev-parse --inside-work-tree >/dev/null 2>&1 || return 1
+    local head br up pushed=""
+    head=$(git rev-parse HEAD 2>/dev/null) || return 1
+    br=$(git symbolic-ref --short HEAD 2>/dev/null) || br="HEAD"
+    up=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+    if [ -n "$up" ] && git merge-base --is-ancestor "$head" "$up" 2>/dev/null; then pushed=1; fi
+    _bold "Smart undo (git): '$cmd'"
+    _yellow "  aktueller HEAD: $head  ($br)"
+    if [ -n "$pushed" ]; then
+        _yellow "  WARNUNG: Der Commit ist in '$up' gepusht - öffentliche History betroffen."
+        echo ""
+        echo "  [1] Nur lokal zurücksetzen   (git reset --soft HEAD~1)"
+        echo "  [2] Zurücksetzen + force-push (entfernt ihn auch vom Remote)"
+        echo "  [3] Revert als neuer Commit   (git revert HEAD)"
+        echo "  [q] Abbrechen"
+        printf "  Wahl [1/2/3/q]: "
+        local m; read -r m
+        case "${m:-1}" in
+            2)
+                _confirm "  git push --force origin $br (destruktiv)?" || return 2
+                git reset --soft HEAD~1 >/dev/null 2>&1 \
+                    && git push --force origin "$br" 2>/dev/null \
+                    && _green "  Reset + force-push OK." \
+                    || _red "  Force-Push fehlgeschlagen."
+                ;;
+            3)
+                git revert --no-edit HEAD >/dev/null 2>&1 \
+                    && _green "  Revert-Commit erstellt." \
+                    || _red "  Revert fehlgeschlagen."
+                ;;
+            q|Q) _yellow "  Abgebrochen."; return 2 ;;
+            *)  git reset --soft HEAD~1 >/dev/null 2>&1 \
+                    && _green "  Lokal zurückgesetzt (--soft). Änderungen bleiben im Index." \
+                    || _red "  Reset fehlgeschlagen."
+                ;;
+        esac
+    else
+        git reset --soft HEAD~1 >/dev/null 2>&1 \
+            && _green "  Lokal zurückgesetzt (--soft). Änderungen bleiben im Index." \
+            || _red "  Reset fehlgeschlagen."
+    fi
+    return 0
+}
+
+handler_pacman() {
+    local hdr cmd pkgs=() tok grab=0
+    hdr=$(head -1 "$1")
+    cmd=$(_trim "$(echo "$hdr" | cut -f2)" | sed 's/^sudo[ ]*//')
+    case "$cmd" in *-Sy*|*-Syu*|*-Su*|*-Syy*) return 1 ;; esac
+    for tok in $cmd; do
+        if [ "$grab" = 1 ]; then case "$tok" in -*) ;; *) pkgs+=("$tok") ;; esac; fi
+        case "$tok" in -S*|--sync) grab=1 ;; esac
+    done
+    [ ${#pkgs[@]} -gt 0 ] || return 1
+    _bold "Smart undo (pacman): entferne Pakete: ${pkgs[*]}"
+    _confirm "  sudo pacman -Rns ${pkgs[*]}" || return 2
+    sudo pacman -Rns "${pkgs[@]}"
+}
+
+handler_pkg() {
+    local hdr cmd tool pkgs=() tok grab=0
+    hdr=$(head -1 "$1")
+    cmd=$(_trim "$(echo "$hdr" | cut -f2)" | sed 's/^sudo[ ]*//')
+    tool=$(echo "$cmd" | awk '{print $1}')
+    case "$tool" in apt|dnf|dnf5) ;; *) return 1 ;; esac
+    for tok in $cmd; do
+        if [ "$grab" = 1 ]; then case "$tok" in -*) ;; *) pkgs+=("$tok") ;; esac; fi
+        [ "$tok" = "install" ] && grab=1
+    done
+    [ ${#pkgs[@]} -gt 0 ] || return 1
+    _bold "Smart undo ($tool): entferne Pakete: ${pkgs[*]}"
+    _confirm "  sudo $tool remove -y ${pkgs[*]}" || return 2
+    sudo $tool remove -y "${pkgs[@]}"
+}
+
+handler_pip() {
+    local hdr cmd pkgs=() tok grab=0
+    hdr=$(head -1 "$1")
+    cmd=$(_trim "$(echo "$hdr" | cut -f2)" | sed 's/^sudo[ ]*//')
+    case "$cmd" in *-r\ *|*-e\ *|*-U\ *|*--upgrade*) return 1 ;; esac
+    for tok in $cmd; do
+        if [ "$grab" = 1 ]; then case "$tok" in -*) ;; *) pkgs+=("$tok") ;; esac; fi
+        [ "$tok" = "install" ] && grab=1
+    done
+    [ ${#pkgs[@]} -gt 0 ] || return 1
+    _bold "Smart undo (pip): entferne Pakete: ${pkgs[*]}"
+    _confirm "  pip uninstall -y ${pkgs[*]}" || return 2
+    pip uninstall -y "${pkgs[@]}"
+}
+
+handler_npm() {
+    local hdr cmd pkgs=() tok grab=0 global=""
+    hdr=$(head -1 "$1")
+    cmd=$(_trim "$(echo "$hdr" | cut -f2)" | sed 's/^sudo[ ]*//')
+    case "$cmd" in *\ ci*|*\ update*) return 1 ;; esac
+    for tok in $cmd; do
+        case "$tok" in -g|--global) global=" -g" ;; esac
+        if [ "$grab" = 1 ]; then case "$tok" in -*) ;; *) pkgs+=("$tok") ;; esac; fi
+        case "$tok" in install|i|add) grab=1 ;; esac
+    done
+    [ ${#pkgs[@]} -gt 0 ] || return 1
+    _bold "Smart undo (npm): entferne Pakete: ${pkgs[*]}"
+    _confirm "  npm uninstall$global ${pkgs[*]}" || return 2
+    npm uninstall $global "${pkgs[@]}"
+}
+
+handler_systemctl() {
+    local hdr cmd verb unit undo
+    hdr=$(head -1 "$1")
+    cmd=$(_trim "$(echo "$hdr" | cut -f2)" | sed 's/^sudo[ ]*//')
+    verb=$(echo "$cmd" | awk '{print $2}')
+    unit=$(echo "$cmd" | awk '{print $3}')
+    [ -n "$unit" ] || return 1
+    case "$verb" in
+        enable)  undo=disable ;;
+        disable) undo=enable  ;;
+        mask)    undo=unmask  ;;
+        unmask)  undo=mask    ;;
+        start)   undo=stop; _yellow "  Achtung: '$verb' wurde möglicherweise schon vorher benutzt." ;;
+        stop)    undo=start  ;;
+        *) return 1 ;;
+    esac
+    _bold "Smart undo (systemctl): '$verb $unit' -> '$undo $unit'"
+    _confirm "  sudo systemctl $undo $unit" || return 2
+    sudo systemctl "$undo" "$unit"
+}
+
 # --- Undo execution ---
 
 undo_entry() {
@@ -182,9 +343,23 @@ undo_entry() {
     [ -f "$file" ] || { _red "Entry not found: $1"; return 1; }
     local snap_dir="$STATE_DIR/${1%.undo}"
     local hdr; hdr=$(head -1 "$file")
-    local cmd; cmd=$(echo "$hdr" | cut -f2)
+    local cmd; cmd=$(_trim "$(echo "$hdr" | cut -f2)")
     local wdir; wdir=$(echo "$hdr" | cut -f3)
     _bold "Undoing: $cmd"
+
+    local hdl
+    hdl=$(detect_handler "$cmd")
+    if [ -n "$hdl" ]; then
+        "$hdl" "$file"
+        local rc=$?
+        [ "$rc" -eq 2 ] && { _yellow "Abgebrochen - nichts geändert."; return 1; }
+        if [ "$rc" -eq 0 ]; then
+            rm -f "$file"; rm -rf "$snap_dir"; _green "Done."
+            return 0
+        fi
+        # rc=1 -> generic fallback
+    fi
+
     [ -d "$wdir" ] && cd "$wdir"
     local creates=() deletes=() modifies=()
     while IFS=$'\t' read -r type rest; do
@@ -313,6 +488,15 @@ Usage:
   undo --hook       Print shell hook code
   undo --help       Show this help
   undo --version    Show version
+
+Smart undo (automatisch erkannt):
+  git commit        -> git reset --soft; bei gepushtem Commit: Menu (force-push/revert)
+  pacman/yay/apt/dnf -S|install -> Paket-Entfernung
+  pip install       -> pip uninstall
+  npm install       -> npm uninstall
+  systemctl cmds    -> Umkehrung (stop/enable/...)
+  Sonstiges         -> generisches Datei-Restore (Standard)
+  UNDO_SMART=0      -> smart undo ausschalten
 EOF
 }
 
