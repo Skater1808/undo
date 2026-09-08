@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-UNDO_VERSION="0.4.1"
+UNDO_VERSION="0.4.2"
 
 UNDO_DIR="${UNDO_DIR:-$HOME/.undo}"
 ENTRIES_DIR="$UNDO_DIR/entries"
@@ -74,7 +74,7 @@ _undo_process() {
 # --- Shell hook: PROMPT_COMMAND-based, no DEBUG trap ---
 do_hook() {
     cat <<'HOOK'
-# undo v0.4.1 - automatic filesystem undo
+# undo v0.4.2 - automatic filesystem undo
 # eval "$(undo --hook)"
 mkdir -p "$HOME/.undo/entries" "$HOME/.undo/state"
 
@@ -236,7 +236,8 @@ list_entries() {
         count=$((count + 1))
         printf '  \033[1m%2d\033[0m  %s  %s  (%s changes)\n' "$count" "$t" "$cmd" "$changes"
     done
-    [ $count -eq 0 ] && _yellow "  (empty)"
+    if [ $count -eq 0 ]; then _yellow "  (empty)"; fi
+    return 0
 }
 
 do_interactive() {
